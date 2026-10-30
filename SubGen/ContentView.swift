@@ -13,6 +13,10 @@ struct ContentView: View {
     @State private var videoName = ""
     @State private var player: AVPlayer?
 
+    // プレビューの字幕オーバーレイ（再生位置を定期的に取得する）
+    @State private var currentPlaybackTime: TimeInterval = 0
+    private let playbackTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+
     // ピッカー
     @State private var photoItem: PhotosPickerItem?
     @State private var showPhotoPicker = false
@@ -55,6 +59,11 @@ struct ContentView: View {
             }
             .navigationTitle("SubGen 字幕")
         }
+        .onReceive(playbackTimer) { _ in
+            if let seconds = player?.currentTime().seconds, seconds.isFinite {
+                currentPlaybackTime = seconds
+            }
+        }
         .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .videos)
         .onChange(of: photoItem) { _, item in
             guard let item else { return }
@@ -94,9 +103,30 @@ struct ContentView: View {
     private var videoSection: some View {
         Section("動画") {
             if let player {
-                VideoPlayer(player: player)
-                    .frame(height: 220)
-                    .listRowInsets(EdgeInsets())
+                ZStack(alignment: .bottom) {
+                    VideoPlayer(player: player)
+                        .frame(height: 220)
+                    if let active = activeSegment {
+                        VStack(spacing: 2) {
+                            Text(active.text)
+                                .font(.headline)
+                                .multilineTextAlignment(.center)
+                            if !active.translatedText.isEmpty {
+                                Text(active.translatedText)
+                                    .font(.subheadline)
+                                    .multilineTextAlignment(.center)
+                            }
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.black.opacity(0.65))
+                        .cornerRadius(8)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 12)
+                    }
+                }
+                .listRowInsets(EdgeInsets())
             }
             Button {
                 showPhotoPicker = true
@@ -173,6 +203,12 @@ struct ContentView: View {
                 Label("生成が完了しました", systemImage: "checkmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.green)
+            }
+
+            if !transcriber.lastAudioSummary.isEmpty {
+                Text("音声チェック: \(transcriber.lastAudioSummary)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -398,6 +434,13 @@ struct ContentView: View {
         player?.play()
     }
 
+    /// 再生位置に重なっている字幕（プレビューのオーバーレイ表示用）
+    private var activeSegment: SubtitleSegment? {
+        segments
+            .sorted { $0.start < $1.start }
+            .first { currentPlaybackTime >= $0.start && currentPlaybackTime < $0.end }
+    }
+
     // MARK: - 字幕の手動編集
 
     /// プレイヤーの現在位置（秒）。取得できない場合は最後の字幕の終了時刻
@@ -439,7 +482,12 @@ struct ContentView: View {
                 )
                 segments = result
                 if result.isEmpty {
-                    displayError = DisplayError(message: "字幕が検出されませんでした。動画に音声が含まれているか確認してください。")
+                    var message = "字幕が検出されませんでした。"
+                    if !transcriber.lastAudioSummary.isEmpty {
+                        message += "\n音声チェック: \(transcriber.lastAudioSummary)"
+                    }
+                    message += "\n音声があるのに変換できない場合は、動画の言語設定（日本語／英語／自動検出）を変えてお試しください。"
+                    displayError = DisplayError(message: message)
                 }
             } catch {
                 displayError = DisplayError(message: "文字起こしに失敗しました: \(error.localizedDescription)")

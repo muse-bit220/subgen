@@ -39,17 +39,42 @@ final class TranscriptionManager: ObservableObject {
     @Published private(set) var downloadProgress: Double?
     /// モデルダウンロードの試行回数（1始まり）。リトライ中のみ意味を持つ
     @Published private(set) var downloadAttempt: Int = 1
+    /// 直近の音声チェック結果（元動画の音声トラック情報＋抽出音声のピーク）
+    @Published private(set) var lastAudioSummary: String = ""
 
     private var whisperKit: WhisperKit?
     private var loadedModelID: String?
 
     private static let maxDownloadAttempts = 3
 
-    /// モデルの保存先（v1.2で変更。以前の保存先に不完全なデータが残っていても影響を受けないよう、
-    /// アプリ専用フォルダへ取り直す）
+    /// モデルの保存先（アプリ専用フォルダ。v1.2と同じ場所を使い、取得済みデータを再利用する）
     private static var modelDownloadBase: URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return documents.appendingPathComponent("SubGenModels", isDirectory: true)
+    }
+
+    /// モデルフォルダの合計サイズ（バイト）
+    private static func folderSize(at url: URL) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: []
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
+    /// ダウンロードが完全とみなせる最小サイズ（想定を大きく下回る場合のみ、不完全として取り直す安全策）
+    private static func minimumExpectedBytes(for modelID: String) -> Int64 {
+        if modelID.contains("large") { return 500_000_000 }
+        if modelID.contains("small") { return 150_000_000 }
+        if modelID.contains("base") { return 80_000_000 }
+        return 10_000_000
     }
 
     /// Whisper の制御トークン（<|...|>）をテキストから除去する
@@ -82,6 +107,13 @@ final class TranscriptionManager: ObservableObject {
         defer { UIApplication.shared.isIdleTimerDisabled = false }
 
         do {
+            // まず元動画に音声トラックがあるか確認する（モデル取得の前に落とす）
+            let sourceInfo = await AudioExtractor.inspectSource(url: videoURL)
+            lastAudioSummary = sourceInfo.summary
+            if sourceInfo.trackCount == 0 {
+                throw TranscriptionError.message("アプリに渡された動画ファイルに、音声トラックが含まれていませんでした。元の動画を写真アプリで再生して音が出るか確認してください。音が出る場合は、「ファイルから選ぶ」で元のファイルを直接読み込むと解決する場合があります。")
+            }
+
             if whisperKit == nil || loadedModelID != modelID {
                 phase = .preparingModel
                 whisperKit = try await prepareModel(modelID: modelID)
@@ -94,6 +126,15 @@ final class TranscriptionManager: ObservableObject {
             phase = .extractingAudio
             let audioURL = try await AudioExtractor.extractAudio(from: videoURL)
             defer { try? FileManager.default.removeItem(at: audioURL) }
+
+            // 抽出音声が無音でないか測る（無音ならモデルに渡しても字幕にならない）
+            let extractedInfo = await AudioExtractor.inspectExtracted(url: audioURL)
+            if extractedInfo.peakDB > -119 {
+                lastAudioSummary = sourceInfo.summary + "／抽出音声ピーク \(Int(extractedInfo.peakDB.rounded()))dB"
+            }
+            if extractedInfo.isSilent {
+                throw TranscriptionError.message("動画から抽出した音声が、ほぼ無音でした（ピーク \(Int(extractedInfo.peakDB.rounded()))dB）。元の動画の音量が極端に小さいか、音声の形式に対応できていない可能性があります。写真アプリでその動画の音が聞こえるか確認してください。")
+            }
 
             phase = .transcribing
             // skipSpecialTokens を有効にしないと <|startoftranscript|> 等の制御トークンが
@@ -131,12 +172,21 @@ final class TranscriptionManager: ObservableObject {
     /// モデルをダウンロードして WhisperKit を初期化する（タイムアウト時は自動リトライ）
     private func prepareModel(modelID: String) async throws -> WhisperKit {
         var lastError: Error?
+        var lastWasIncompleteData = false
         for attempt in 1 ... Self.maxDownloadAttempts {
             downloadAttempt = attempt
             downloadProgress = nil
             do {
                 let folder = try await downloadModel(modelID: modelID)
                 downloadProgress = nil
+                // サイズ検証：想定より小さい場合は不完全なデータとして削除し、取り直す
+                let size = Self.folderSize(at: folder)
+                if size < Self.minimumExpectedBytes(for: modelID) {
+                    try? FileManager.default.removeItem(at: folder)
+                    lastWasIncompleteData = true
+                    throw TranscriptionError.message("モデルデータが不完全でした（\(size / 1_000_000)MB）")
+                }
+                lastWasIncompleteData = false
                 let config = WhisperKitConfig(
                     downloadBase: Self.modelDownloadBase,
                     modelFolder: folder.path,
@@ -152,6 +202,9 @@ final class TranscriptionManager: ObservableObject {
             }
         }
         downloadProgress = nil
+        if lastWasIncompleteData {
+            throw TranscriptionError.message("モデルデータのダウンロードが繰り返し不完全なまま終わりました。電波の良いWi-Fiで再度お試しください。Largeモデルで続く場合は、軽量な「Base」モデルが安定します。")
+        }
         throw TranscriptionError.friendly(from: lastError)
     }
 
