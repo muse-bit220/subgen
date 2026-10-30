@@ -17,8 +17,8 @@ targets:
       path: SubGen/Info.plist
       properties:
         CFBundleDisplayName: SubGen 字幕
-        CFBundleShortVersionString: "1.2"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.3"
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -27,8 +27,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aramaki.subgen
-        MARKETING_VERSION: "1.2"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "1.3"
+        CURRENT_PROJECT_VERSION: "3"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
