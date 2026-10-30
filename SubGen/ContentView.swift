@@ -20,7 +20,7 @@ struct ContentView: View {
 
     // 文字起こし設定
     @State private var selectedModelID = ModelOption.defaultModelID
-    @State private var languageChoice = "auto" // auto / ja / en
+    @State private var languageChoice = "ja" // auto / ja / en（誤検出防止のため既定は日本語）
 
     // 字幕
     @State private var segments: [SubtitleSegment] = []
@@ -45,10 +45,12 @@ struct ContentView: View {
                 videoSection
                 settingsSection
                 generateSection
+                if videoURL != nil {
+                    segmentsSection
+                }
                 if !segments.isEmpty {
                     translateSection
                     exportSection
-                    segmentsSection
                 }
             }
             .navigationTitle("SubGen 字幕")
@@ -136,7 +138,7 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
-            Text("モデルは初回使用時に自動でダウンロードされます（通信が必要です）。")
+            Text("モデルは初回使用時に自動でダウンロードされます（約140MB〜626MB）。Wi-Fi接続で、画面をつけたままお待ちください。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -156,11 +158,16 @@ struct ContentView: View {
             .disabled(videoURL == nil || transcriber.isBusy)
 
             if transcriber.isBusy {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text(phaseText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text(phaseText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if transcriber.phase == .preparingModel, let progress = transcriber.downloadProgress {
+                        ProgressView(value: progress)
+                    }
                 }
             } else if transcriber.phase == .done && !segments.isEmpty {
                 Label("生成が完了しました", systemImage: "checkmark.circle.fill")
@@ -231,6 +238,18 @@ struct ContentView: View {
 
     private var segmentsSection: some View {
         Section("字幕（\(segments.count)件）") {
+            Button {
+                addSegmentAtCurrentTime()
+            } label: {
+                Label("字幕を追加（現在の再生位置から）", systemImage: "plus.circle")
+            }
+
+            if segments.isEmpty {
+                Text("字幕はまだありません。自動生成するか、「字幕を追加」で手動で作れます。文章と開始・終了の秒数はタップして編集できます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             ForEach($segments) { $segment in
                 VStack(alignment: .leading, spacing: 6) {
                     Button {
@@ -241,8 +260,50 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
 
-                    TextField("字幕", text: $segment.text, axis: .vertical)
+                    TextField("字幕を入力", text: $segment.text, axis: .vertical)
                         .lineLimit(1 ... 4)
+
+                    HStack(spacing: 6) {
+                        Text("開始")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("開始秒", value: $segment.start, format: .number.precision(.fractionLength(1)))
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 56)
+                        Text("秒")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("再生位置に") {
+                            var updated = segment
+                            updated.start = currentPlayerTime()
+                            $segment.wrappedValue = updated
+                        }
+                        .font(.caption)
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+
+                    HStack(spacing: 6) {
+                        Text("終了")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("終了秒", value: $segment.end, format: .number.precision(.fractionLength(1)))
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 56)
+                        Text("秒")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("再生位置に") {
+                            var updated = segment
+                            updated.end = currentPlayerTime()
+                            $segment.wrappedValue = updated
+                        }
+                        .font(.caption)
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
 
                     if !segment.translatedText.isEmpty {
                         TextField("翻訳", text: $segment.translatedText, axis: .vertical)
@@ -253,6 +314,14 @@ struct ContentView: View {
                 .padding(.vertical, 2)
             }
             .onDelete { segments.remove(atOffsets: $0) }
+
+            if segments.count > 1 {
+                Button {
+                    sanitizeAndSortSegments()
+                } label: {
+                    Label("時間順に並べ替え", systemImage: "arrow.up.arrow.down")
+                }
+            }
         }
     }
 
@@ -263,6 +332,16 @@ struct ContentView: View {
         case .idle, .done:
             return ""
         case .preparingModel:
+            if let progress = transcriber.downloadProgress, progress > 0 {
+                let percent = Int(progress * 100)
+                if transcriber.downloadAttempt > 1 {
+                    return "モデルをダウンロード中… \(percent)%（再試行 \(transcriber.downloadAttempt)回目／初回のみ）"
+                }
+                return "モデルをダウンロード中… \(percent)%（初回のみ・時間がかかります）"
+            }
+            if transcriber.downloadAttempt > 1 {
+                return "モデルを準備中…（再試行 \(transcriber.downloadAttempt)回目）"
+            }
             return "モデルを準備中…（初回はダウンロードします）"
         case .extractingAudio:
             return "音声を抽出中…"
@@ -319,6 +398,34 @@ struct ContentView: View {
         player?.play()
     }
 
+    // MARK: - 字幕の手動編集
+
+    /// プレイヤーの現在位置（秒）。取得できない場合は最後の字幕の終了時刻
+    private func currentPlayerTime() -> TimeInterval {
+        if let seconds = player?.currentTime().seconds, seconds.isFinite {
+            return max(0, seconds)
+        }
+        return segments.last?.end ?? 0
+    }
+
+    /// 現在の再生位置から3秒間の字幕を新規追加する
+    private func addSegmentAtCurrentTime() {
+        let start = currentPlayerTime()
+        segments.append(SubtitleSegment(start: start, end: start + 3, text: ""))
+        segments.sort { $0.start < $1.start }
+    }
+
+    /// 開始・終了の不整合（終了が開始以下など）を直して時間順に並べ替える
+    private func sanitizeAndSortSegments() {
+        for index in segments.indices {
+            segments[index].start = max(0, segments[index].start)
+            if segments[index].end <= segments[index].start {
+                segments[index].end = segments[index].start + 0.5
+            }
+        }
+        segments.sort { $0.start < $1.start }
+    }
+
     // MARK: - 文字起こし
 
     private func runTranscription() {
@@ -371,6 +478,7 @@ struct ContentView: View {
     // MARK: - 書き出し
 
     private func exportSRT(mode: SubtitleExportMode) {
+        sanitizeAndSortSegments()
         let srt = SRTExporter.makeSRT(segments: segments, mode: mode)
         let baseName = (videoName as NSString).deletingPathExtension
         let fileName = (baseName.isEmpty ? "subtitles" : baseName) + "_subtitles.srt"
@@ -399,6 +507,7 @@ struct ContentView: View {
 
     private func runBurnIn() {
         guard let videoURL else { return }
+        sanitizeAndSortSegments()
         let mode = burnInMode
         isBurningIn = true
         Task {
