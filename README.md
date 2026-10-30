@@ -19,7 +19,7 @@ Vrew のような「自動字幕＋翻訳＋書き出し」の基本機能を備
 ## 動作条件
 
 - iOS 18 以上の iPhone
-- インストールには AltStore または SideStore が必要（pokeLDN と同じ方式）
+- インストールには AltStore または SideStore が必要
 
 ## ビルド方法（GitHub Actions で IPA を作る）
 
