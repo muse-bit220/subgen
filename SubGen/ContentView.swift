@@ -53,7 +53,7 @@ struct ContentView: View {
             }
             .navigationTitle("SubGen 字幕")
         }
-        .photosPicker(isPresented: $showPhotoPicker, item: $photoItem, matching: .videos)
+        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .videos)
         .onChange(of: photoItem) { _, item in
             guard let item else { return }
             Task { await loadPhotoItem(item) }
