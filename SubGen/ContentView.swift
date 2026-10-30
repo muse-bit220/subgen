@@ -38,6 +38,13 @@ struct ContentView: View {
     @State private var burnInMode: SubtitleExportMode = .original
     @State private var isBurningIn = false
 
+    // 無音カット
+    @State private var silenceCutEnabled = false // 無音カットする／しない（既定は「しない」）
+    @State private var silenceStrength: SilenceCutter.Strength = .standard
+    @State private var isCuttingSilence = false
+    @State private var applyCutToSubtitles = true
+    @State private var cutSummary: String?
+
     // 共有・エラー
     @State private var shareURL: URL?
     @State private var showShare = false
@@ -55,6 +62,7 @@ struct ContentView: View {
                 if !segments.isEmpty {
                     translateSection
                     exportSection
+                    silenceCutSection
                 }
             }
             .navigationTitle("SubGen 字幕")
@@ -269,6 +277,58 @@ struct ContentView: View {
                 }
             }
             .disabled(isBurningIn)
+            Text(silenceCutEnabled
+                ? "焼き込みには無音カット「する（\(silenceStrength.rawValue)）」が適用されます"
+                : "無音カットはしません（元の動画に焼き込みます）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var silenceCutSection: some View {
+        Section("無音カット") {
+            Picker("無音カット", selection: $silenceCutEnabled) {
+                Text("しない").tag(false)
+                Text("する").tag(true)
+            }
+            .pickerStyle(.segmented)
+
+            if silenceCutEnabled {
+                Text("声のない区間を検出して詰めた動画を書き出します。Vrewの「無音部分を短縮」と同じ発想です。この「する」の選択は、字幕の焼き込み書き出しにも適用されます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("強さ", selection: $silenceStrength) {
+                    ForEach(SilenceCutter.Strength.allCases) { strength in
+                        Text(strength.rawValue).tag(strength)
+                    }
+                }
+                Toggle("字幕のタイミングもカット後に合わせる", isOn: $applyCutToSubtitles)
+                Button {
+                    runSilenceCut()
+                } label: {
+                    HStack {
+                        if isCuttingSilence {
+                            ProgressView()
+                        }
+                        Label("無音カットした動画を書き出す", systemImage: "scissors")
+                    }
+                }
+                .disabled(isCuttingSilence)
+                if let cutSummary {
+                    Text(cutSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if applyCutToSubtitles {
+                    Text("字幕を合わせると、この画面のプレビュー（元の動画）とはタイミングが合わなくなります。カット後の動画用の字幕になります。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("「する」を選ぶと、無音を詰めた動画を書き出したり、字幕の焼き込みに無音カットを適用したりできます。「しない」の間は、今までどおり元の動画のまま書き出します。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -557,19 +617,63 @@ struct ContentView: View {
         guard let videoURL else { return }
         sanitizeAndSortSegments()
         let mode = burnInMode
+        let cutEnabled = silenceCutEnabled
+        let strength = silenceStrength
+        let sourceSegments = segments
         isBurningIn = true
         Task {
             defer { isBurningIn = false }
             do {
+                var sourceURL = videoURL
+                var burnSegments = sourceSegments
+                if cutEnabled {
+                    // 無音カット「する」の場合は、先に無音を詰めた動画を作り、
+                    // 字幕もカット後のタイミングに付け替えてから焼き込む
+                    let cut = try await SilenceCutter.exportCutVideo(
+                        videoURL: videoURL,
+                        strength: strength
+                    )
+                    sourceURL = cut.outputURL
+                    burnSegments = SilenceCutter.remapSegments(
+                        sourceSegments,
+                        keepRanges: cut.keepRanges
+                    )
+                }
                 let url = try await BurnInExporter.export(
-                    videoURL: videoURL,
-                    segments: segments,
+                    videoURL: sourceURL,
+                    segments: burnSegments,
                     displayText: { displayText(for: $0, mode: mode) }
                 )
                 shareURL = url
                 showShare = true
             } catch {
                 displayError = DisplayError(message: "焼き込み書き出しに失敗しました: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func runSilenceCut() {
+        guard let videoURL else { return }
+        isCuttingSilence = true
+        cutSummary = nil
+        Task {
+            defer { isCuttingSilence = false }
+            do {
+                let result = try await SilenceCutter.exportCutVideo(
+                    videoURL: videoURL,
+                    strength: silenceStrength
+                )
+                if applyCutToSubtitles {
+                    segments = SilenceCutter.remapSegments(segments, keepRanges: result.keepRanges)
+                }
+                cutSummary = String(
+                    format: "%.1f秒 → %.1f秒（無音を %.1f秒カット）",
+                    result.originalDuration, result.newDuration, result.removedDuration
+                )
+                shareURL = result.outputURL
+                showShare = true
+            } catch {
+                displayError = DisplayError(message: error.localizedDescription)
             }
         }
     }
