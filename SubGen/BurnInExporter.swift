@@ -53,9 +53,13 @@ enum BurnInExporter {
             let text = displayText(segment)
             guard !text.isEmpty else { continue }
 
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .center
+            paragraph.lineBreakMode = .byWordWrapping
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: UIColor.white,
+                .paragraphStyle: paragraph,
             ]
             let bounding = (text as NSString).boundingRect(
                 with: CGSize(width: maxTextWidth - horizontalPadding * 2, height: .greatestFiniteMagnitude),
@@ -65,14 +69,36 @@ enum BurnInExporter {
             )
             let layerWidth = min(ceil(bounding.width) + horizontalPadding * 2, maxTextWidth)
             let layerHeight = ceil(bounding.height) + verticalPadding * 2
+            let pillSize = CGSize(width: layerWidth, height: layerHeight)
 
-            let textLayer = CATextLayer()
-            textLayer.string = NSAttributedString(string: text, attributes: attributes)
-            textLayer.alignmentMode = .center
-            textLayer.isWrapped = true
-            textLayer.backgroundColor = UIColor.black.withAlphaComponent(0.55).cgColor
-            textLayer.cornerRadius = fontSize * 0.22
-            textLayer.contentsScale = 2.0
+            // 字幕の見た目（半透明の黒背景＋白文字）は、書き出し側の
+            // CATextLayer 描画に任せず、ここで画像として描き切ってしまう。
+            // 無音カット後の2回目の書き出しでは CATextLayer の背景だけが描かれ
+            // 文字が出ない事象があったため、画像化して確実に表示する。
+            let imageFormat = UIGraphicsImageRendererFormat()
+            imageFormat.scale = 2
+            imageFormat.opaque = false
+            let pillImage = UIGraphicsImageRenderer(size: pillSize, format: imageFormat).image { _ in
+                let rect = CGRect(origin: .zero, size: pillSize)
+                UIColor.black.withAlphaComponent(0.55).setFill()
+                UIBezierPath(roundedRect: rect, cornerRadius: fontSize * 0.22).fill()
+                let textRect = CGRect(
+                    x: horizontalPadding,
+                    y: verticalPadding,
+                    width: pillSize.width - horizontalPadding * 2,
+                    height: pillSize.height - verticalPadding * 2
+                )
+                (text as NSString).draw(
+                    with: textRect,
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: attributes,
+                    context: nil
+                )
+            }
+
+            let textLayer = CALayer()
+            textLayer.contents = pillImage.cgImage
+            textLayer.contentsScale = pillImage.scale
             textLayer.frame = CGRect(
                 x: (renderSize.width - layerWidth) / 2,
                 y: bottomMargin,
