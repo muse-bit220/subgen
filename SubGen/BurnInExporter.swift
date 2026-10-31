@@ -79,8 +79,19 @@ enum BurnInExporter {
                 width: layerWidth,
                 height: layerHeight
             )
-            textLayer.beginTime = AVCoreAnimationBeginTimeAtZero + segment.start
-            textLayer.duration = max(segment.duration, 0.1)
+            // 表示タイミングは、レイヤー自身の beginTime / duration ではなく
+            // 不透明度アニメーションで制御する。書き出し（オフライン描画）では
+            // レイヤーのタイミング指定が評価されず字幕が一切出なかったため、
+            // AVFoundation の公式サンプル等で実績のある方式に変更した。
+            textLayer.opacity = 0
+            let visibility = CAKeyframeAnimation(keyPath: "opacity")
+            visibility.values = [0.0, 1.0, 1.0, 0.0]
+            visibility.keyTimes = [0.0, 0.03, 0.97, 1.0]
+            visibility.beginTime = AVCoreAnimationBeginTimeAtZero + segment.start
+            visibility.duration = max(segment.duration, 0.1)
+            visibility.fillMode = .both
+            visibility.isRemovedOnCompletion = false
+            textLayer.add(visibility, forKey: "subtitleVisibility")
             parentLayer.addSublayer(textLayer)
         }
 
