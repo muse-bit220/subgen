@@ -41,6 +41,7 @@ struct ContentView: View {
     // 無音カット
     @State private var silenceCutEnabled = false // 無音カットする／しない（既定は「しない」）
     @State private var silenceStrength: SilenceCutter.Strength = .standard
+    @State private var silenceCutBurnIn = true // 無音カット書き出しに字幕も焼き込む（既定はオン）
     @State private var isCuttingSilence = false
     @State private var applyCutToSubtitles = true
     @State private var cutSummary: String?
@@ -300,6 +301,14 @@ struct ContentView: View {
                 Picker("強さ", selection: $silenceStrength) {
                     ForEach(SilenceCutter.Strength.allCases) { strength in
                         Text(strength.rawValue).tag(strength)
+                    }
+                }
+                Toggle("字幕も焼き込む", isOn: $silenceCutBurnIn)
+                if silenceCutBurnIn {
+                    Picker("焼き込む字幕", selection: $burnInMode) {
+                        ForEach(SubtitleExportMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
                     }
                 }
                 Toggle("字幕のタイミングもカット後に合わせる", isOn: $applyCutToSubtitles)
@@ -654,6 +663,9 @@ struct ContentView: View {
 
     private func runSilenceCut() {
         guard let videoURL else { return }
+        let burnIn = silenceCutBurnIn
+        let mode = burnInMode
+        let sourceSegments = segments
         isCuttingSilence = true
         cutSummary = nil
         Task {
@@ -663,14 +675,27 @@ struct ContentView: View {
                     videoURL: videoURL,
                     strength: silenceStrength
                 )
+                let remapped = SilenceCutter.remapSegments(
+                    sourceSegments,
+                    keepRanges: result.keepRanges
+                )
+                var outputURL = result.outputURL
+                if burnIn {
+                    // カット後の動画に、タイミングを付け替えた字幕を焼き込む
+                    outputURL = try await BurnInExporter.export(
+                        videoURL: result.outputURL,
+                        segments: remapped,
+                        displayText: { displayText(for: $0, mode: mode) }
+                    )
+                }
                 if applyCutToSubtitles {
-                    segments = SilenceCutter.remapSegments(segments, keepRanges: result.keepRanges)
+                    segments = remapped
                 }
                 cutSummary = String(
                     format: "%.1f秒 → %.1f秒（無音を %.1f秒カット）",
                     result.originalDuration, result.newDuration, result.removedDuration
                 )
-                shareURL = result.outputURL
+                shareURL = outputURL
                 showShare = true
             } catch {
                 displayError = DisplayError(message: error.localizedDescription)
